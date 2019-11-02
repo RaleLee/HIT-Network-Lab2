@@ -1,0 +1,243 @@
+package sr;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+
+public class SRserver implements Runnable {
+
+  private int window = 5; // size of window
+  private int sended = 0; // 当前已确认的发送报文 含
+  private int cur = 0; // current sending index
+  private int last = 0; // last segment index
+  private int segLength = 120; // segment length
+  private int headerLength = 4; // header length
+
+  private boolean isSend = false;
+
+  private Set<Integer> acks = new HashSet<Integer>();
+  private ArrayList<byte[]> sendList = new ArrayList<byte[]>();
+  private DatagramSocket sendSocket;
+  private InetAddress clientAddress;
+
+  public SRserver(InputStream fromFile, InetAddress clientAddress) {
+    this.clientAddress = clientAddress;
+    try {
+      sendSocket = new DatagramSocket(RunSR.serverPort);
+
+      byte[] data = new byte[segLength];
+      int length = 0;
+      while (true) {
+        length = fromFile.read(data, headerLength, segLength - headerLength);
+        if (length == -1) {
+          break;
+        }
+        this.last += 1;
+        this.sendList.add(Arrays.copyOf(data, length + headerLength));
+      }
+      System.out.println("Send:" + this.last);
+    } catch (IOException e) {
+      // TODO 自动生成的 catch 块
+      e.printStackTrace();
+    }
+
+  }
+
+  public SRserver() {
+    // TODO 自动生成的构造函数存根
+  }
+
+  public void send() {
+    isSend = true;
+    while (isSend) {
+      // System.out.println("Fuck!");
+      if (sended + window > cur && cur < last) {
+        try {
+          System.out.println("Sending!");
+          this.sendSocket.send(packDatagram(cur));
+          new Thread(new Timer(cur)).start();
+          cur += 1;
+        } catch (IOException e) {
+          e.printStackTrace();
+        }
+      }
+      try {
+        Thread.sleep(10);
+      } catch (InterruptedException e) {
+        // TODO 自动生成的 catch 块
+        e.printStackTrace();
+      }
+    }
+  }
+
+  public DatagramPacket packDatagram(int index) {
+    if (index == last - 1) { // Last seg or not
+      sendList.get(index)[0] = 1;
+    } else {
+      sendList.get(index)[0] = 0;
+    }
+    sendList.get(index)[1] = (byte) index;
+    sendList.get(index)[2] = (byte) last;
+    sendList.get(index)[3] = (byte) (sendList.get(index).length - headerLength);
+    return new DatagramPacket(sendList.get(index), sendList.get(index).length, clientAddress,
+        RunSR.clientPort);
+  }
+
+  public void Timeout(int index) {
+    try {
+      if (!acks.contains(index)) {
+        System.out.println("Server: Resend " + index);
+        sendSocket.send(packDatagram(index));
+        new Thread(new Timer(index)).start();
+      }
+    } catch (IOException e) {
+      // TODO 自动生成的 catch 块
+      e.printStackTrace();
+    }
+  }
+
+  public void Receive() {
+    DatagramPacket recePacket = new DatagramPacket(new byte[segLength], segLength);
+    while (isSend) {
+      try {
+        sendSocket.receive(recePacket);
+        int ack = recePacket.getData()[2];
+        acks.add(ack);
+        int min;
+        for (min = 0; min <= last; min++) {
+          if (!acks.contains(min)) {
+            break;
+          }
+        }
+        sended = min;
+        System.out.println("Server: Receive " + ack + " cur = " + cur);
+        if (acks.size() == last) {
+          isSend = false;
+          System.out.println("Server: Send All!!");
+          return;
+        }
+      } catch (IOException e) {
+        e.printStackTrace();
+      }
+    }
+  }
+
+  @Override
+  public void run() {
+    new Thread(new Runnable() {
+      @Override
+      public void run() {
+        Receive();
+      }
+    }).start();
+
+    send();
+
+  }
+
+  private class Timer implements Runnable {
+    private int index;
+
+    public Timer(int index) {
+      this.index = index;
+    }
+
+    @Override
+    public void run() {
+      try {
+        Thread.sleep(2000);
+
+        SRserver srserver = new SRserver();
+        srserver.Timeout(index);
+      } catch (InterruptedException e) {
+        e.printStackTrace();
+      }
+
+    }
+  }
+}
+package sr;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.SocketException;
+import java.util.HashSet;
+import java.util.Set;
+
+public class SRclient implements Runnable {
+
+  private int segLength = 120; // segment length
+  private int headerLength = 4; // header length
+
+  private InetAddress serverAddress;
+  private DatagramSocket sendSocket;
+  private OutputStream toFile;
+
+  private Set<Integer> received = new HashSet<Integer>();
+  private boolean isRece = false;
+
+  public SRclient(OutputStream toFile) {
+    this.toFile = toFile;
+    try {
+      sendSocket = new DatagramSocket(RunSR.clientPort);
+    } catch (SocketException e) {
+      e.printStackTrace();
+    }
+  }
+
+  @Override
+  public void run() {
+    isRece = true;
+    DatagramPacket recePacket = new DatagramPacket(new byte[segLength], segLength);
+    while (isRece) {
+      try {
+        sendSocket.receive(recePacket);
+        if (serverAddress == null) {
+          serverAddress = recePacket.getAddress();
+        }
+        recePacket.getData();
+        int seq = recePacket.getData()[1];
+        System.out.println("Client: Receive " + seq);
+        int end = recePacket.getData()[2];
+        int length = recePacket.getData()[3];
+
+        if (Math.random() > 0.9) {
+          return;
+        } else {
+          received.add(seq);
+          toFile.write(recePacket.getData(), headerLength, length);
+          System.out.println("Client: Received " + seq + " successfully!");
+          byte[] sendToServer = new byte[4];
+          sendToServer[0] = 0;
+          sendToServer[1] = 0;
+          sendToServer[2] = (byte) seq;
+          sendToServer[3] = 0;
+          System.out.println("Client: Send " + seq + " ack");
+          sendSocket.send(
+              new DatagramPacket(sendToServer, headerLength, serverAddress, RunSR.serverPort));
+          if (received.size() == end) {
+            isRece = false;
+          }
+        }
+      } catch (IOException e) {
+        // TODO 自动生成的 catch 块
+        e.printStackTrace();
+      }
+      try {
+        Thread.sleep((int) Math.random() * 20);
+      } catch (InterruptedException e) {
+        e.printStackTrace();
+      }
+    }
+  }
+}
+
